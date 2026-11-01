@@ -1,0 +1,56 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ---------------------------------------------------------------------------
+ * Global resets tuned for the OneNote Clone shell.
+ * ------------------------------------------------------------------------ */
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+}
+
+body {
+  font-family:
+    'Segoe UI',
+    'Segoe UI Variable',
+    -apple-system,
+    BlinkMacSystemFont,
+    Roboto,
+    'Helvetica Neue',
+    Arial,
+    sans-serif;
+  background-color: #f3f2f1;
+  color: #1f1f1f;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* Subtle, Windows-like scrollbars for the navigation columns. */
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+*::-webkit-scrollbar-thumb {
+  background-color: rgba(0, 0, 0, 0.18);
+  border-radius: 4px;
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background-color: rgba(0, 0, 0, 0.3);
+}
+
+*::-webkit-scrollbar-track {
+  background-color: transparent;
+}
+
+/* Remove the default focus ring flash on inputs inside the paper surface. */
+textarea:focus,
+input:focus {
+  outline: none;
+}
