@@ -37,6 +37,8 @@ jobs:
 
       - name: Initialize Capacitor Android
         run: |
+          npx --yes @capacitor/cli init "OneNote Clone" "com.onenote.clone" --web-dir dist || true
+          npm install @capacitor/android
           npx --yes @capacitor/cli add android || true
           npx --yes @capacitor/cli sync android
 
