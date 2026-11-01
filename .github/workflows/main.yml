@@ -37,8 +37,8 @@ jobs:
 
       - name: Initialize Capacitor Android
         run: |
-          npx cap add android || true
-          npx cap sync android
+          npx --yes @capacitor/cli add android || true
+          npx --yes @capacitor/cli sync android
 
       - name: Build Android Debug APK
         run: |
