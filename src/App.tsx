@@ -24,7 +24,16 @@ import { DEFAULT_TAGS } from './types';
 import RichTextEditor from './RichTextEditor';
 import DrawingCanvas from './DrawingCanvas';
 import type { DrawingCanvasHandle, DrawingToolbarState, InkTool } from './DrawingCanvas';
+import { normalizeDrawings } from './DrawingCanvas';
 import { INK_COLORS, htmlToPlainText } from './richText';
+
+/** Minimal stroke model for the quick-draw overlay on the page list. */
+interface QuickStroke {
+  id: string;
+  points: Array<{ x: number; y: number }>;
+  color: string;
+  width: number;
+}
 
 /* ==========================================================================
  * Constants & tiny utilities
@@ -51,8 +60,102 @@ function formatRelativeTime(timestamp: number | null): string {
 }
 
 function pagePreview(note: Note): string {
-  const flat = note.content.replace(/\s+/g, ' ').trim();
+  const flat = htmlToPlainText(note.content).replace(/\s+/g, ' ').trim();
   return flat.length === 0 ? 'Empty page' : flat.slice(0, 80);
+}
+
+const INK_TOOL_LABELS: Readonly<Record<InkTool, string>> = {
+  pen: 'Pen',
+  pencil: 'Pencil',
+  highlighter: 'Highlighter',
+  eraser: 'Eraser',
+};
+
+function makeQuickStrokeId(): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID();
+  }
+  return `qs-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+/* ==========================================================================
+ * Quick-draw overlay — lightweight SVG ink for the page-list column
+ * (complements the full DrawingCanvas on the paper surface)
+ * ======================================================================== */
+
+interface QuickDrawOverlayProps {
+  strokes: QuickStroke[];
+  color: string;
+  width: number;
+  enabled: boolean;
+  onStrokesChange: (strokes: QuickStroke[]) => void;
+}
+
+function QuickDrawOverlay({ strokes, color, width, enabled, onStrokesChange }: QuickDrawOverlayProps) {
+  const svgRef = useRef<SVGSVGElement | null>(null);
+  const liveStrokeRef = useRef<QuickStroke | null>(null);
+  const activePointerRef = useRef<number | null>(null);
+  const [liveRenderTick, setLiveRenderTick] = useState(0);
+
+  const pointFromEvent = (event: React.PointerEvent<SVGSVGElement>): { x: number; y: number } => {
+    const svg = svgRef.current;
+    if (!svg) return { x: 0, y: 0 };
+    const rect = svg.getBoundingClientRect();
+    return { x: event.clientX - rect.left, y: event.clientY - rect.top };
+  };
+
+  const handlePointerDown = (event: React.PointerEvent<SVGSVGElement>): void => {
+    if (!enabled) return;
+    event.preventDefault();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    activePointerRef.current = event.pointerId;
+    liveStrokeRef.current = { id: makeQuickStrokeId(), points: [pointFromEvent(event)], color, width };
+    setLiveRenderTick((t) => t + 1);
+  };
+
+  const handlePointerMove = (event: React.PointerEvent<SVGSVGElement>): void => {
+    if (!enabled || activePointerRef.current !== event.pointerId) return;
+    const live = liveStrokeRef.current;
+    if (!live) return;
+    live.points.push(pointFromEvent(event));
+    setLiveRenderTick((t) => t + 1);
+  };
+
+  const finishStroke = (): void => {
+    const live = liveStrokeRef.current;
+    liveStrokeRef.current = null;
+    activePointerRef.current = null;
+    if (live && live.points.length > 1) onStrokesChange([...strokes, live]);
+    setLiveRenderTick((t) => t + 1);
+  };
+
+  const renderable: QuickStroke[] =
+    liveRenderTick >= 0 && liveStrokeRef.current ? [...strokes, liveStrokeRef.current] : strokes;
+
+  return (
+    <svg
+      ref={svgRef}
+      className="absolute inset-0 h-full w-full"
+      style={{ pointerEvents: enabled ? 'auto' : 'none', touchAction: 'none', cursor: enabled ? 'crosshair' : 'default' }}
+      aria-label="Quick draw layer"
+      onPointerDown={handlePointerDown}
+      onPointerMove={handlePointerMove}
+      onPointerUp={finishStroke}
+      onPointerCancel={finishStroke}
+    >
+      {renderable.map((stroke) => (
+        <polyline
+          key={stroke.id}
+          fill="none"
+          stroke={stroke.color}
+          strokeWidth={stroke.width}
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          points={stroke.points.map((p) => `${p.x},${p.y}`).join(' ')}
+        />
+      ))}
+    </svg>
+  );
 }
 
 /* ==========================================================================
@@ -443,12 +546,56 @@ interface PageListProps {
 }
 
 function PageColumn({ pages, activePageId, onSelect, onTogglePin, onDelete }: PageListProps) {
+  const [quickDrawEnabled, setQuickDrawEnabled] = useState(false);
+  const [quickStrokes, setQuickStrokes] = useState<QuickStroke[]>([]);
+  const [quickColor, setQuickColor] = useState<string>(INK_COLORS[0] ?? '#681498');
+
   return (
     <div className="flex min-h-0 flex-1 flex-col bg-[#f7f4f2]">
-      <div className="px-3 pb-1 pt-3 text-[11px] font-semibold uppercase tracking-wider text-neutral-500">
-        Pages
+      <div className="flex items-center gap-2 px-3 pb-1 pt-3">
+        <span className="text-[11px] font-semibold uppercase tracking-wider text-neutral-500">Pages</span>
+        <button
+          type="button"
+          onClick={() => setQuickDrawEnabled((v) => !v)}
+          aria-pressed={quickDrawEnabled}
+          title="Sketch a quick note over the page list"
+          className={`ml-auto rounded border px-1.5 py-0.5 text-[10px] font-medium transition ${
+            quickDrawEnabled
+              ? 'border-[#681498] bg-[#681498] text-white'
+              : 'border-neutral-300 bg-white text-neutral-600 hover:border-purple-400 hover:text-[#681498]'
+          }`}
+        >
+          ✎ Quick draw
+        </button>
+        {quickDrawEnabled && (
+          <>
+            <label className="flex items-center gap-1 text-[10px] text-neutral-500">
+              Ink
+              <select
+                value={quickColor}
+                onChange={(e) => setQuickColor(e.target.value)}
+                aria-label="Quick draw ink color"
+                className="h-5 rounded border border-neutral-300 bg-white px-1 text-[10px]"
+              >
+                {INK_COLORS.map((c) => (
+                  <option key={c} value={c}>
+                    {c}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <button
+              type="button"
+              onClick={() => setQuickStrokes([])}
+              className="rounded border border-neutral-300 bg-white px-1.5 py-0.5 text-[10px] text-neutral-600 hover:border-red-300 hover:text-red-600"
+            >
+              Clear
+            </button>
+          </>
+        )}
       </div>
-      <ul className="flex-1 overflow-y-auto px-2 pb-2">
+      <div className="relative min-h-0 flex-1">
+        <ul className="h-full overflow-y-auto px-2 pb-2">
         {pages.length === 0 && (
           <li className="px-2 py-2 text-xs italic text-neutral-500">
             This section has no pages. Click “New Page” to add one.
@@ -515,7 +662,17 @@ function PageColumn({ pages, activePageId, onSelect, onTogglePin, onDelete }: Pa
             </li>
           );
         })}
-      </ul>
+        </ul>
+        {quickDrawEnabled && (
+          <QuickDrawOverlay
+            strokes={quickStrokes}
+            color={quickColor}
+            width={2.5}
+            enabled={quickDrawEnabled}
+            onStrokesChange={setQuickStrokes}
+          />
+        )}
+      </div>
     </div>
   );
 }
@@ -532,6 +689,7 @@ interface PageCanvasProps {
   onBackgroundChange: (style: BackgroundStyle) => void;
   onAddTag: (tag: string) => void;
   onRemoveTag: (tag: string) => void;
+  onDrawingsChange: (drawings: DrawingData) => void;
 }
 
 function backgroundStyleFor(style: BackgroundStyle): CSSProperties {
@@ -563,8 +721,25 @@ function PageCanvas({
   onBackgroundChange,
   onAddTag,
   onRemoveTag,
+  onDrawingsChange,
 }: PageCanvasProps) {
   const [tagInput, setTagInput] = useState('');
+  const [drawMode, setDrawMode] = useState(false);
+  const [inkTool, setInkTool] = useState<InkTool>('pen');
+  const [inkColor, setInkColor] = useState<string>(INK_COLORS[0] ?? '#681498');
+  const [inkSize, setInkSize] = useState(1);
+  const canvasHandleRef = useRef<DrawingCanvasHandle | null>(null);
+
+  useEffect(() => {
+    if (drawMode) setTagInput('');
+  }, [drawMode]);
+
+  const drawingToolbar: DrawingToolbarState = useMemo(
+    () => ({ tool: inkTool, color: inkColor, size: inkSize }),
+    [inkTool, inkColor, inkSize],
+  );
+
+  const strokeCount = useMemo(() => normalizeDrawings(note?.drawings ?? '').strokes.length, [note?.drawings]);
 
   const submitTag = useCallback(
     (e: FormEvent<HTMLFormElement>) => {
@@ -619,14 +794,103 @@ function PageCanvas({
             ))}
           </select>
         </label>
+        <span className="h-4 w-px bg-neutral-200" aria-hidden="true" />
+        <button
+          type="button"
+          onClick={() => setDrawMode((v) => !v)}
+          aria-pressed={drawMode}
+          className={`flex h-7 items-center gap-1 rounded border px-2 text-xs font-medium transition ${
+            drawMode
+              ? 'border-[#681498] bg-[#681498] text-white'
+              : 'border-neutral-300 bg-white text-neutral-600 hover:border-purple-400 hover:text-[#681498]'
+          }`}
+        >
+          ✎ Draw
+        </button>
+        {strokeCount > 0 && (
+          <span className="text-[11px] text-neutral-400">{strokeCount} ink stroke{strokeCount === 1 ? '' : 's'}</span>
+        )}
         <span className="ml-auto text-[11px] text-neutral-400">
           Edited {new Date(note.updatedAt).toLocaleString()}
         </span>
       </div>
 
+      {/* Drawing ribbon — visible while the Draw tab is active */}
+      {drawMode && (
+        <div className="flex h-9 shrink-0 flex-wrap items-center gap-2 border-b border-black/10 bg-[#faf9f8] px-4">
+          {(Object.keys(INK_TOOL_LABELS) as InkTool[]).map((toolName) => (
+            <button
+              key={toolName}
+              type="button"
+              onClick={() => setInkTool(toolName)}
+              aria-pressed={inkTool === toolName}
+              className={`h-6 rounded px-2 text-xs capitalize transition ${
+                inkTool === toolName
+                  ? 'bg-[#681498] font-semibold text-white'
+                  : 'bg-white text-neutral-600 ring-1 ring-neutral-300 hover:ring-purple-400'
+              }`}
+            >
+              {INK_TOOL_LABELS[toolName]}
+            </button>
+          ))}
+          <span className="h-4 w-px bg-neutral-200" aria-hidden="true" />
+          <span className="flex items-center gap-1">
+            {INK_COLORS.map((c) => (
+              <button
+                key={c}
+                type="button"
+                onClick={() => setInkColor(c)}
+                aria-label={`Ink color ${c}`}
+                aria-pressed={inkColor === c}
+                className={`h-5 w-5 rounded-full border-2 transition ${
+                  inkColor === c ? 'scale-110 border-neutral-800' : 'border-white ring-1 ring-neutral-300'
+                }`}
+                style={{ backgroundColor: c }}
+              />
+            ))}
+          </span>
+          <span className="h-4 w-px bg-neutral-200" aria-hidden="true" />
+          <label className="flex items-center gap-1 text-xs text-neutral-600">
+            Size
+            <input
+              type="range"
+              min={0.5}
+              max={3}
+              step={0.25}
+              value={inkSize}
+              onChange={(e) => setInkSize(Number(e.target.value))}
+              aria-label="Ink size"
+              className="w-20 accent-[#681498]"
+            />
+          </label>
+          <span className="h-4 w-px bg-neutral-200" aria-hidden="true" />
+          <button
+            type="button"
+            onClick={() => canvasHandleRef.current?.undo()}
+            className="h-6 rounded bg-white px-2 text-xs text-neutral-600 ring-1 ring-neutral-300 hover:ring-purple-400"
+          >
+            Undo
+          </button>
+          <button
+            type="button"
+            onClick={() => canvasHandleRef.current?.redo()}
+            className="h-6 rounded bg-white px-2 text-xs text-neutral-600 ring-1 ring-neutral-300 hover:ring-purple-400"
+          >
+            Redo
+          </button>
+          <button
+            type="button"
+            onClick={() => canvasHandleRef.current?.clearAll()}
+            className="h-6 rounded bg-white px-2 text-xs text-red-600 ring-1 ring-red-200 hover:ring-red-400"
+          >
+            Clear ink
+          </button>
+        </div>
+      )}
+
       {/* Paper surface */}
       <div className="min-h-0 flex-1 overflow-y-auto p-4 sm:p-6">
-        <div className="mx-auto flex min-h-full w-full max-w-4xl flex-col rounded-sm bg-white shadow-panel ring-1 ring-black/5">
+        <div className="relative mx-auto flex min-h-full w-full max-w-4xl flex-col rounded-sm bg-white shadow-panel ring-1 ring-black/5">
           <input
             value={note.title}
             onChange={(e) => onTitleChange(e.target.value)}
@@ -670,15 +934,22 @@ function PageCanvas({
             </form>
           </div>
 
-          {/* Body */}
-          <textarea
-            value={note.content}
-            onChange={(e) => onContentChange(e.target.value)}
+          {/* Body — Phase 2 rich-text editor replaces the legacy textarea */}
+          <RichTextEditor
+            noteId={note.id}
+            html={note.content}
+            onChange={onContentChange}
+            paperStyle={backgroundStyleFor(note.backgroundStyle)}
             placeholder="Start typing your notes…"
-            aria-label="Page content"
-            spellCheck
-            className="min-h-[420px] w-full flex-1 resize-none px-8 pb-10 pt-2 text-[15px] text-neutral-800 outline-none placeholder:text-neutral-300"
-            style={backgroundStyleFor(note.backgroundStyle)}
+          />
+
+          {/* Phase 2 freehand ink layer, aligned to the paper surface */}
+          <DrawingCanvas
+            value={note.drawings}
+            onChange={onDrawingsChange}
+            enabled={drawMode}
+            handleRef={canvasHandleRef}
+            toolbar={drawingToolbar}
           />
         </div>
       </div>
@@ -747,6 +1018,7 @@ export default function App() {
     addTag,
     removeTag,
     setBackgroundStyle,
+    setDrawings,
     searchNotes,
   } = store;
 
@@ -836,6 +1108,9 @@ export default function App() {
           }}
           onRemoveTag={(tag) => {
             if (activeNote) removeTag(activeNote.id, tag);
+          }}
+          onDrawingsChange={(drawings) => {
+            if (activeNote) setDrawings(activeNote.id, drawings);
           }}
         />
       </div>
