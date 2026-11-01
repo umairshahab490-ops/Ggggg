@@ -32,8 +32,16 @@ jobs:
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
-          distribution: 'zulu'
+          distribution: 'temurin'
           java-version: '17'
+
+      - name: Configure Gradle for CI
+        run: |
+          mkdir -p $HOME/gradle-home
+          echo "GRADLE_USER_HOME=$HOME/gradle-home" >> $GITHUB_ENV
+          if [ -f android/gradle.properties ]; then
+            sed -i 's/-Xmx[0-9]*m/-Xmx3072m/g' android/gradle.properties || true
+          fi
 
       - name: Initialize Capacitor Android
         run: |
