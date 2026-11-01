@@ -15,12 +15,16 @@
  * ---------------------------------------------------------------------------
  */
 
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ChangeEvent, CSSProperties, FormEvent } from 'react';
 import { useNotes } from './useNotes';
 import type { UseNotesResult } from './useNotes';
-import type { BackgroundStyle, Note, Notebook, Section } from './types';
+import type { BackgroundStyle, DrawingData, Note, Notebook, Section } from './types';
 import { DEFAULT_TAGS } from './types';
+import RichTextEditor from './RichTextEditor';
+import DrawingCanvas from './DrawingCanvas';
+import type { DrawingCanvasHandle, DrawingToolbarState, InkTool } from './DrawingCanvas';
+import { INK_COLORS, htmlToPlainText } from './richText';
 
 /* ==========================================================================
  * Constants & tiny utilities
