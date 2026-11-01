@@ -22,10 +22,11 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { ChangeEvent, CSSProperties, FormEvent } from 'react';
+import type { CSSProperties, FormEvent, ReactNode } from 'react';
 import { useNotes } from './useNotes';
-import type { UseNotesResult } from './useNotes';
+import type { NoteSearchResult, UseNotesResult } from './useNotes';
 import type { BackgroundStyle, DrawingData, Note, Notebook, Section, TagDefinition } from './types';
+import { DEFAULT_TAGS } from './types';
 import RichTextEditor from './RichTextEditor';
 import DrawingCanvas from './DrawingCanvas';
 import type { DrawingCanvasHandle, DrawingToolbarState, InkTool } from './DrawingCanvas';
@@ -41,6 +42,14 @@ interface QuickStroke {
   points: Array<{ x: number; y: number }>;
   color: string;
   width: number;
+}
+
+/** Resolves a tag label to its registry entry so chips can show its color. */
+type TagLookup = (name: string) => TagDefinition | undefined;
+
+/** Normalizes user text into a valid single tag label ('' when unusable). */
+function sanitizeTagInput(raw: string): string {
+  return raw.trim().replace(/\s*,\s*/g, ' ').replace(/[#@]/g, '').slice(0, 32);
 }
 
 /* ==========================================================================
@@ -251,6 +260,20 @@ function TrashIcon({ size = 14, className }: IconProps) {
   );
 }
 
+function TagIcon({ size = 14, className }: IconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" className={className} aria-hidden="true">
+      <path
+        d="M4 4h7.5L20 12.5 12.5 20 4 11.5V4Z"
+        stroke="currentColor"
+        strokeWidth="1.5"
+        strokeLinejoin="round"
+      />
+      <circle cx="8.25" cy="8.25" r="1.35" fill="currentColor" />
+    </svg>
+  );
+}
+
 /* ==========================================================================
  * Header bar
  * ======================================================================== */
@@ -263,7 +286,8 @@ interface HeaderBarProps {
   onNewSection: () => void;
   onNewNotebook: () => void;
   disabled: boolean;
-  exportMenu: React.ReactNode;
+  exportMenu: ReactNode;
+  onOpenTagManager: () => void;
 }
 
 function HeaderBar({
@@ -275,6 +299,7 @@ function HeaderBar({
   onNewNotebook,
   disabled,
   exportMenu,
+  onOpenTagManager,
 }: HeaderBarProps) {
   return (
     <header
@@ -316,8 +341,20 @@ function HeaderBar({
         {isSaving ? 'Saving…' : formatRelativeTime(lastSavedAt)}
       </div>
 
-      {/* Export ribbon (File · Review) */}
+      {/* Export ribbon (File · Review): Markdown / Plain text / HTML / JSON backup */}
       {exportMenu}
+
+      {/* Tag manager trigger */}
+      <button
+        type="button"
+        onClick={onOpenTagManager}
+        aria-label="Open tag manager"
+        title="Manage color-coded tags"
+        className="flex h-8 items-center gap-1.5 rounded-md border border-white/25 px-2.5 text-xs font-medium text-white transition hover:bg-white/10"
+      >
+        <TagIcon size={14} />
+        <span className="hidden xl:inline">Tags</span>
+      </button>
 
       {/* Primary actions */}
       <div className="flex items-center gap-2">
@@ -555,9 +592,24 @@ interface PageListProps {
   onSelect: (id: string) => void;
   onTogglePin: (id: string) => void;
   onDelete: (id: string) => void;
+  /** Registry lookup so each chip can render its assigned color. */
+  findTagByName: TagLookup;
+  /** Currently active sidebar tag filter (null = show everything). */
+  selectedTagFilter: string | null;
+  /** Clicking a chip in the list toggles that tag as the filter. */
+  onFilterByTag: (tag: string) => void;
 }
 
-function PageColumn({ pages, activePageId, onSelect, onTogglePin, onDelete }: PageListProps) {
+function PageColumn({
+  pages,
+  activePageId,
+  onSelect,
+  onTogglePin,
+  onDelete,
+  findTagByName,
+  selectedTagFilter,
+  onFilterByTag,
+}: PageListProps) {
   const [quickDrawEnabled, setQuickDrawEnabled] = useState(false);
   const [quickStrokes, setQuickStrokes] = useState<QuickStroke[]>([]);
   const [quickColor, setQuickColor] = useState<string>(INK_COLORS[0] ?? '#681498');
@@ -661,12 +713,15 @@ function PageColumn({ pages, activePageId, onSelect, onTogglePin, onDelete }: Pa
                 {page.tags.length > 0 && (
                   <div className="mt-1 flex flex-wrap gap-1 pl-5">
                     {page.tags.map((tag) => (
-                      <span
+                      <TagChip
                         key={tag}
-                        className="rounded-full bg-purple-50 px-1.5 py-px text-[10px] font-medium text-[#681498]"
-                      >
-                        {tag}
-                      </span>
+                        definition={findTagByName(tag)}
+                        name={tag}
+                        size="sm"
+                        active={selectedTagFilter === tag}
+                        onClick={() => onFilterByTag(tag)}
+                        title={`Filter pages by “${tag}”`}
+                      />
                     ))}
                   </div>
                 )}
@@ -702,6 +757,10 @@ interface PageCanvasProps {
   onAddTag: (tag: string) => void;
   onRemoveTag: (tag: string) => void;
   onDrawingsChange: (drawings: DrawingData) => void;
+  /** Registry lookup so page chips render their assigned colors. */
+  findTagByName: TagLookup;
+  /** Full tag registry, used to populate the quick-add suggestions list. */
+  tags: TagDefinition[];
 }
 
 function backgroundStyleFor(style: BackgroundStyle): CSSProperties {
@@ -734,6 +793,8 @@ function PageCanvas({
   onAddTag,
   onRemoveTag,
   onDrawingsChange,
+  findTagByName,
+  tags,
 }: PageCanvasProps) {
   const [tagInput, setTagInput] = useState('');
   const [drawMode, setDrawMode] = useState(false);
@@ -756,7 +817,7 @@ function PageCanvas({
   const submitTag = useCallback(
     (e: FormEvent<HTMLFormElement>) => {
       e.preventDefault();
-      const value = tagInput.trim();
+      const value = sanitizeTagInput(tagInput);
       if (value && note) onAddTag(value);
       setTagInput('');
     },
@@ -783,7 +844,17 @@ function PageCanvas({
     );
   }
 
-  const availableSuggestions = DEFAULT_TAGS.filter((t) => !note.tags.includes(t)).slice(0, 3);
+  const availableSuggestions = useMemo(() => {
+    const used = new Set((note?.tags ?? []).map((t) => t.toLowerCase()));
+    const registry: Array<{ name: string; color: string }> = tags
+      .filter((tag) => !used.has(tag.name.toLowerCase()))
+      .map((tag) => ({ name: tag.name, color: tag.color }));
+    const seeds = DEFAULT_TAGS.filter((name) => !used.has(name.toLowerCase())).map((name) => ({
+      name,
+      color: ONENOTE_PURPLE,
+    }));
+    return [...registry, ...seeds].slice(0, 6);
+  }, [note?.tags, tags]);
 
   return (
     <main className="flex min-w-0 flex-1 flex-col bg-[#f3f2f1]">
@@ -911,23 +982,16 @@ function PageCanvas({
             className="w-full border-b border-neutral-100 px-8 pb-2 pt-6 text-2xl font-semibold text-neutral-900 outline-none placeholder:text-neutral-300"
           />
 
-          {/* Tag row */}
+          {/* Tag row — colored registry chips + quick add */}
           <div className="flex flex-wrap items-center gap-1.5 px-8 pb-2 pt-3">
             {note.tags.map((tag) => (
-              <span
+              <TagChip
                 key={tag}
-                className="inline-flex items-center gap-1 rounded-full bg-purple-50 py-0.5 pl-2 pr-1 text-xs font-medium text-[#681498]"
-              >
-                {tag}
-                <button
-                  type="button"
-                  onClick={() => onRemoveTag(tag)}
-                  aria-label={`Remove tag ${tag}`}
-                  className="flex h-4 w-4 items-center justify-center rounded-full text-[#681498]/70 hover:bg-purple-100 hover:text-[#681498]"
-                >
-                  ×
-                </button>
-              </span>
+                definition={findTagByName(tag)}
+                name={tag}
+                onRemove={() => onRemoveTag(tag)}
+                title={`${tag} — click × to remove`}
+              />
             ))}
             <form onSubmit={submitTag} className="inline-flex items-center">
               <input
@@ -940,7 +1004,7 @@ function PageCanvas({
               />
               <datalist id="tag-suggestions">
                 {availableSuggestions.map((t) => (
-                  <option key={t} value={t} />
+                  <option key={t.name} value={t.name} />
                 ))}
               </datalist>
             </form>
@@ -998,6 +1062,106 @@ function StatusBar({ breadcrumb, stats, isSaving, lastSavedAt }: StatusBarProps)
 }
 
 /* ==========================================================================
+ * Tag filter strip — sidebar row of color-coded chips (click to filter)
+ * ======================================================================== */
+
+interface TagFilterStripProps {
+  tags: TagDefinition[];
+  usageCounts: ReadonlyMap<string, number>;
+  selectedTagFilter: string | null;
+  onToggleFilter: (tag: string) => void;
+  onOpenManager: () => void;
+}
+
+function TagFilterStrip({
+  tags,
+  usageCounts,
+  selectedTagFilter,
+  onToggleFilter,
+  onOpenManager,
+}: TagFilterStripProps) {
+  const visible = useMemo(
+    () =>
+      tags
+        .map((tag) => ({ tag, count: usageCounts.get(tag.name.toLowerCase()) ?? 0 }))
+        .filter((entry) => entry.count > 0 || entry.tag.name === selectedTagFilter)
+        .sort((a, b) => b.count - a.count || a.tag.name.localeCompare(b.tag.name)),
+    [selectedTagFilter, tags, usageCounts],
+  );
+
+  return (
+    <div className="shrink-0 border-t border-black/10 bg-[#f7f4f2] px-3 py-2">
+      <div className="mb-1 flex items-center justify-between">
+        <span className="text-[11px] font-semibold uppercase tracking-wider text-neutral-500">Tags</span>
+        <button
+          type="button"
+          onClick={onOpenManager}
+          className="rounded px-1 text-[11px] font-medium text-[#681498] hover:bg-purple-50"
+        >
+          Manage…
+        </button>
+      </div>
+      {visible.length === 0 ? (
+        <p className="pb-1 text-[11px] italic text-neutral-500">No tagged pages yet.</p>
+      ) : (
+        <div className="flex flex-wrap gap-1">
+          {visible.map(({ tag, count }) => (
+            <TagChip
+              key={tag.id}
+              definition={tag}
+              name={tag.name}
+              size="sm"
+              active={selectedTagFilter === tag.name}
+              onClick={() => onToggleFilter(tag.name)}
+              title={`${count} page${count === 1 ? '' : 's'} · click to ${
+                selectedTagFilter === tag.name ? 'clear filter' : 'filter'
+              }`}
+            />
+          ))}
+        </div>
+      )}
+      {selectedTagFilter && (
+        <button
+          type="button"
+          onClick={() => onToggleFilter(selectedTagFilter)}
+          className="mt-1.5 text-[11px] font-medium text-neutral-500 underline-offset-2 hover:text-[#681498] hover:underline"
+        >
+          Clear tag filter
+        </button>
+      )}
+    </div>
+  );
+}
+
+/* ==========================================================================
+ * Toast host — transient confirmations for exports and destructive actions
+ * ======================================================================== */
+
+interface ToastItem {
+  id: string;
+  message: string;
+}
+
+function ToastStack({ toasts }: { toasts: ToastItem[] }) {
+  if (toasts.length === 0) return null;
+  return (
+    <div className="pointer-events-none fixed bottom-10 right-4 z-50 flex w-80 flex-col gap-2">
+      {toasts.map((toast) => (
+        <div
+          key={toast.id}
+          role="status"
+          aria-live="polite"
+          className="animate-toast-in rounded-md border border-black/10 bg-white px-3 py-2 text-xs font-medium text-neutral-700 shadow-panel"
+          style={{ borderLeftWidth: 4, borderLeftColor: ONENOTE_PURPLE }}
+        >
+          {toast.message}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/* ==========================================================================
  * Root component
  * ======================================================================== */
 
@@ -1005,6 +1169,7 @@ export default function App() {
   const store = useNotes();
   const {
     notebooks,
+    notes,
     activeNotebook,
     activeSection,
     activeNote,
@@ -1031,19 +1196,134 @@ export default function App() {
     removeTag,
     setBackgroundStyle,
     setDrawings,
-    searchNotes,
+    searchAllNotes,
+    tags,
+    createTag,
+    renameTag,
+    retagColor,
+    deleteTag,
+    findTagByName,
   } = store;
 
-  const [searchQuery, setSearchQuery] = useState('');
+  /* ---------------- Phase 3 UI state ---------------- */
+  const [isSearchOpen, setIsSearchOpen] = useState(false);
+  const [isTagManagerOpen, setIsTagManagerOpen] = useState(false);
+  const [selectedTagFilter, setSelectedTagFilter] = useState<string | null>(null);
+  const [toasts, setToasts] = useState<ToastItem[]>([]);
+  const toastSeqRef = useRef(0);
 
-  const searchResults = useMemo(
-    () => (searchQuery.trim() ? searchNotes(searchQuery) : null),
-    [searchQuery, searchNotes],
+  const pushToast = useCallback((message: string) => {
+    const id = `t-${Date.now().toString(36)}-${(toastSeqRef.current += 1)}`;
+    setToasts((current) => [...current.slice(-2), { id, message }]);
+    window.setTimeout(() => {
+      setToasts((current) => current.filter((toast) => toast.id !== id));
+    }, 3200);
+  }, []);
+
+  /* Ctrl+F / ⌘F toggles the global instant-search modal anywhere in the app. */
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent): void => {
+      const key = event.key.toLowerCase();
+      if ((event.ctrlKey || event.metaKey) && key === 'f') {
+        event.preventDefault();
+        setIsSearchOpen((open) => !open);
+        return;
+      }
+      if ((event.ctrlKey || event.metaKey) && key === 'k') {
+        event.preventDefault();
+        setIsSearchOpen(true);
+        return;
+      }
+      if (event.key === 'Escape') {
+        setIsSearchOpen(false);
+        setIsTagManagerOpen(false);
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, []);
+
+  /* ---------------- Search wiring ---------------- */
+  const openSearch = useCallback(() => setIsSearchOpen(true), []);
+  const closeSearch = useCallback(() => setIsSearchOpen(false), []);
+
+  const handleSearchSelect = useCallback(
+    (result: NoteSearchResult) => {
+      if (result.notebook) selectNotebook(result.notebook.id);
+      if (result.section) selectSection(result.section.id);
+      selectPage(result.note.id);
+      setIsSearchOpen(false);
+      pushToast(`Opened “${result.note.title}”`);
+    },
+    [pushToast, selectNotebook, selectPage, selectSection],
   );
 
-  /* Displayed page list: search results override the section filter. */
-  const displayedPages = searchResults ?? activeSectionNotes;
+  /* ---------------- Tag filtering ---------------- */
+  const toggleTagFilter = useCallback((tag: string) => {
+    setSelectedTagFilter((current) => (current === tag ? null : tag));
+  }, []);
 
+  const filteredPages = useMemo(() => {
+    if (!selectedTagFilter) return activeSectionNotes;
+    const needle = selectedTagFilter.toLowerCase();
+    return activeSectionNotes.filter((page) => page.tags.some((tag) => tag.toLowerCase() === needle));
+  }, [activeSectionNotes, selectedTagFilter]);
+
+  const tagUsageCounts = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const note of notes) {
+      for (const tag of note.tags) {
+        const key = tag.toLowerCase();
+        counts.set(key, (counts.get(key) ?? 0) + 1);
+      }
+    }
+    return counts as ReadonlyMap<string, number>;
+  }, [notes]);
+
+  const handleCreateTag = useCallback(
+    (name: string, color: string) => {
+      const created = createTag(name, color);
+      pushToast(created ? `Tag “${created.name}” created` : 'Tag already exists');
+    },
+    [createTag, pushToast],
+  );
+
+  const handleRenameTag = useCallback(
+    (tagId: string, name: string) => {
+      const previous = tags.find((tag) => tag.id === tagId)?.name;
+      renameTag(tagId, name);
+      if (previous && selectedTagFilter === previous) {
+        setSelectedTagFilter(name.trim());
+      }
+    },
+    [renameTag, selectedTagFilter, tags],
+  );
+
+  const handleDeleteTag = useCallback(
+    (tagId: string) => {
+      const removed = tags.find((tag) => tag.id === tagId)?.name;
+      deleteTag(tagId);
+      if (removed && selectedTagFilter === removed) setSelectedTagFilter(null);
+      if (removed) pushToast(`Tag “${removed}” deleted`);
+    },
+    [deleteTag, pushToast, selectedTagFilter, tags],
+  );
+
+  /* ---------------- Export wiring ---------------- */
+  const handleExported = useCallback(
+    (format: string, filename: string) => {
+      const labels: Record<string, string> = {
+        markdown: 'Markdown',
+        text: 'Plain text',
+        html: 'HTML',
+        json: 'JSON backup',
+      };
+      pushToast(`Exported ${labels[format] ?? format} → ${filename}`);
+    },
+    [pushToast],
+  );
+
+  /* ---------------- Structural actions ---------------- */
   const handleNewPage = useCallback(() => {
     if (!activeSection) {
       createSection('New Section');
@@ -1067,14 +1347,24 @@ export default function App() {
   return (
     <div className="flex h-screen w-screen flex-col overflow-hidden bg-[#f3f2f1] font-sans text-neutral-900">
       <HeaderBar
-        searchQuery={searchQuery}
-        onSearchChange={setSearchQuery}
+        onOpenSearch={openSearch}
         isSaving={isSaving}
         lastSavedAt={lastSavedAt}
         onNewPage={handleNewPage}
         onNewSection={handleNewSection}
         onNewNotebook={handleNewNotebook}
         disabled={!activeNotebook}
+        onOpenTagManager={() => setIsTagManagerOpen(true)}
+        exportMenu={
+          <ExportMenu
+            note={activeNote}
+            sectionName={activeSection?.name ?? 'Unfiled'}
+            notebookName={activeNotebook?.name ?? 'Notebook'}
+            notebooks={notebooks}
+            notes={notes}
+            onExported={handleExported}
+          />
+        }
       />
 
       <div className="flex min-h-0 flex-1">
@@ -1095,11 +1385,21 @@ export default function App() {
             onDelete={deleteSection}
           />
           <PageColumn
-            pages={displayedPages}
+            pages={filteredPages}
             activePageId={store.activePageId}
             onSelect={selectPage}
             onTogglePin={togglePin}
             onDelete={deletePage}
+            findTagByName={findTagByName}
+            selectedTagFilter={selectedTagFilter}
+            onFilterByTag={toggleTagFilter}
+          />
+          <TagFilterStrip
+            tags={tags}
+            usageCounts={tagUsageCounts}
+            selectedTagFilter={selectedTagFilter}
+            onToggleFilter={toggleTagFilter}
+            onOpenManager={() => setIsTagManagerOpen(true)}
           />
         </aside>
 
@@ -1116,7 +1416,10 @@ export default function App() {
             if (activeNote) setBackgroundStyle(activeNote.id, style);
           }}
           onAddTag={(tag) => {
-            if (activeNote) addTag(activeNote.id, tag);
+            if (!activeNote) return;
+            addTag(activeNote.id, tag);
+            /* Keep brand-new labels registered so chips get a color. */
+            if (!findTagByName(tag)) createTag(tag);
           }}
           onRemoveTag={(tag) => {
             if (activeNote) removeTag(activeNote.id, tag);
@@ -1124,6 +1427,8 @@ export default function App() {
           onDrawingsChange={(drawings) => {
             if (activeNote) setDrawings(activeNote.id, drawings);
           }}
+          findTagByName={findTagByName}
+          tags={tags}
         />
       </div>
 
@@ -1133,6 +1438,30 @@ export default function App() {
         isSaving={isSaving}
         lastSavedAt={lastSavedAt}
       />
+
+      {/* Phase 3 overlays */}
+      <SearchModal
+        open={isSearchOpen}
+        onClose={closeSearch}
+        searchAllNotes={searchAllNotes}
+        onSelectResult={handleSearchSelect}
+      />
+
+      {isTagManagerOpen && (
+        <div className="fixed inset-0 z-40 flex items-start justify-end bg-black/20 p-4 sm:p-6">
+          <TagManagerPanel
+            tags={tags}
+            usageCounts={tagUsageCounts}
+            onCreate={handleCreateTag}
+            onRename={handleRenameTag}
+            onRecolor={retagColor}
+            onDelete={handleDeleteTag}
+            onClose={() => setIsTagManagerOpen(false)}
+          />
+        </div>
+      )}
+
+      <ToastStack toasts={toasts} />
     </div>
   );
 }
