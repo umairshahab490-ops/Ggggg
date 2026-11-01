@@ -181,6 +181,32 @@ export function escapeHtml(text: string): string {
 }
 
 /**
+ * Highlight every case-insensitive occurrence of `query` inside `text`,
+ * returning React-ready segments. Used by the Phase 3 search surfaces so
+ * matched terms light up in titles and content snippets.
+ */
+export function highlightSegments(
+  text: string,
+  query: string,
+): Array<{ text: string; match: boolean }> {
+  const trimmed = query.trim();
+  if (trimmed.length === 0) return [{ text, match: false }];
+  const segments: Array<{ text: string; match: boolean }> = [];
+  const haystack = text.toLowerCase();
+  const needle = trimmed.toLowerCase();
+  let cursor = 0;
+  let found = haystack.indexOf(needle);
+  while (found !== -1) {
+    if (found > cursor) segments.push({ text: text.slice(cursor, found), match: false });
+    segments.push({ text: text.slice(found, found + needle.length), match: true });
+    cursor = found + needle.length;
+    found = haystack.indexOf(needle, cursor);
+  }
+  if (cursor < text.length) segments.push({ text: text.slice(cursor), match: false });
+  return segments;
+}
+
+/**
  * Intercept a paste on the contentEditable surface and inject sanitized
  * content manually, preventing raw external markup from entering the store.
  */

@@ -19,12 +19,17 @@ import type {
   Notebook,
   NotesState,
   Section,
+  TagDefinition,
   TextStatistics,
 } from './types';
 import {
+  DEFAULT_TAG_DEFINITIONS,
   NOTES_STORAGE_KEY,
   SECTION_PALETTE,
+  TAG_COLOR_PALETTE,
+  TAGS_STORAGE_KEY,
 } from './types';
+import { htmlToPlainText } from './richText';
 
 /** Debounce window (ms) before the state is flushed to localStorage. */
 const AUTOSAVE_DEBOUNCE_MS = 600;
@@ -202,18 +207,60 @@ function loadState(): NotesState {
  * Statistics
  * ------------------------------------------------------------------------ */
 function computeStatistics(content: string): TextStatistics {
-  const trimmed = content.trim();
+  // Page bodies are stored as sanitized HTML (Phase 2); measure the visible
+  // text so word/character counts match what the user actually sees.
+  const visible = htmlToPlainText(content).replace(/\u00a0/g, ' ');
+  const trimmed = visible.trim();
   const wordCount = trimmed.length === 0 ? 0 : trimmed.split(/\s+/).length;
-  const characterCount = content.length;
-  const characterCountNoSpaces = content.replace(/\s/g, '').length;
-  const lineCount = content.length === 0 ? 0 : content.split('\n').length;
+  const characterCount = visible.length;
+  const characterCountNoSpaces = visible.replace(/\s/g, '').length;
+  const lineCount = trimmed.length === 0 ? 0 : trimmed.split('\n').filter((line) => line.trim().length > 0).length;
   const readingTimeMinutes = Math.max(wordCount === 0 ? 0 : 1, Math.round(wordCount / 200));
   return { wordCount, characterCount, characterCountNoSpaces, lineCount, readingTimeMinutes };
 }
 
 /* --------------------------------------------------------------------------
+ * Tag registry persistence (Phase 3 Tag Manager)
+ * ------------------------------------------------------------------------ */
+function isTagDefinition(value: unknown): value is TagDefinition {
+  if (typeof value !== 'object' || value === null) return false;
+  const t = value as Record<string, unknown>;
+  return typeof t.id === 'string' && typeof t.name === 'string' && typeof t.color === 'string';
+}
+
+function loadTags(): TagDefinition[] {
+  try {
+    const raw = window.localStorage.getItem(TAGS_STORAGE_KEY);
+    if (!raw) return [...DEFAULT_TAG_DEFINITIONS];
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed) || !parsed.every(isTagDefinition)) {
+      return [...DEFAULT_TAG_DEFINITIONS];
+    }
+    return parsed as TagDefinition[];
+  } catch {
+    return [...DEFAULT_TAG_DEFINITIONS];
+  }
+}
+
+function saveTags(tags: TagDefinition[]): void {
+  try {
+    window.localStorage.setItem(TAGS_STORAGE_KEY, JSON.stringify(tags));
+  } catch {
+    // Storage unavailable — tag registry stays in memory for this session.
+  }
+}
+
+/* --------------------------------------------------------------------------
  * Public hook surface
  * ------------------------------------------------------------------------ */
+
+/** A note paired with its owning section/notebook — produced by global search. */
+export interface NoteSearchResult {
+  note: Note;
+  section: Section | null;
+  notebook: Notebook | null;
+}
+
 export interface UseNotesResult {
   /* Raw collections */
   notebooks: Notebook[];
@@ -261,6 +308,17 @@ export interface UseNotesResult {
 
   /* Search */
   searchNotes: (query: string) => Note[];
+  /** Global instant search across every notebook, enriched with location info. */
+  searchAllNotes: (query: string) => NoteSearchResult[];
+
+  /* Tag manager (Phase 3) */
+  tags: TagDefinition[];
+  createTag: (name: string, color?: string) => TagDefinition | null;
+  renameTag: (tagId: string, name: string) => void;
+  retagColor: (tagId: string, color: string) => void;
+  deleteTag: (tagId: string) => void;
+  /** Look up the registry entry for a tag name (case-insensitive). */
+  findTagByName: (name: string) => TagDefinition | undefined;
 
   /* Persistence signals */
   stats: TextStatistics;
@@ -660,12 +718,127 @@ export function useNotes(): UseNotesResult {
         .filter(
           (n) =>
             n.title.toLowerCase().includes(q) ||
-            n.content.toLowerCase().includes(q) ||
+            htmlToPlainText(n.content).toLowerCase().includes(q) ||
             n.tags.some((t) => t.toLowerCase().includes(q)),
         )
         .sort((a, b) => b.updatedAt - a.updatedAt);
     },
     [],
+  );
+
+  /**
+   * Global instant search across every notebook. Each hit is enriched with
+   * its owning section/notebook so the UI can render breadcrumbs and jump
+   * straight to the page. Matching prefers titles, then tags, then body text.
+   */
+  const searchAllNotes = useCallback((query: string): NoteSearchResult[] => {
+    const q = query.trim().toLowerCase();
+    if (!q) return [];
+    const snapshot = stateRef.current;
+
+    const sectionIndex = new Map<string, { section: Section; notebook: Notebook }>();
+    for (const notebook of snapshot.notebooks) {
+      for (const section of notebook.sections) {
+        sectionIndex.set(section.id, { section, notebook });
+      }
+    }
+
+    const results: Array<NoteSearchResult & { score: number }> = [];
+    for (const note of snapshot.notes) {
+      const titleLower = note.title.toLowerCase();
+      const tagLower = note.tags.map((t) => t.toLowerCase());
+      const bodyLower = htmlToPlainText(note.content).toLowerCase();
+      let score = 0;
+      if (titleLower.includes(q)) score += 10;
+      if (tagLower.some((t) => t.includes(q))) score += 5;
+      if (bodyLower.includes(q)) score += 1;
+      if (score === 0) continue;
+      const location = sectionIndex.get(note.sectionId);
+      results.push({
+        note,
+        section: location?.section ?? null,
+        notebook: location?.notebook ?? null,
+        score,
+      });
+    }
+
+    results.sort(
+      (a, b) => b.score - a.score || b.note.updatedAt - a.note.updatedAt,
+    );
+    return results.map(({ note, section, notebook }) => ({ note, section, notebook }));
+  }, []);
+
+  /* --------------------------- Tag manager ------------------------------ */
+  const [tags, setTags] = useState<TagDefinition[]>(loadTags);
+
+  useEffect(() => {
+    saveTags(tags);
+  }, [tags]);
+
+  const createTag = useCallback(
+    (name: string, color?: string): TagDefinition | null => {
+      const normalized = name.trim();
+      if (!normalized) return null;
+      const existing = tags.find((t) => t.name.toLowerCase() === normalized.toLowerCase());
+      if (existing) return existing;
+      const assignedColor =
+        color && /^#[0-9a-fA-F]{3,8}$/.test(color)
+          ? color
+          : TAG_COLOR_PALETTE[tags.length % TAG_COLOR_PALETTE.length];
+      const definition: TagDefinition = { id: generateId('tag'), name: normalized, color: assignedColor };
+      setTags((prev) => [...prev, definition]);
+      return definition;
+    },
+    [tags],
+  );
+
+  const renameTag = useCallback(
+    (tagId: string, name: string) => {
+      const normalized = name.trim();
+      if (!normalized) return;
+      const target = tags.find((t) => t.id === tagId);
+      if (!target || target.name === normalized) return;
+      // Rename in the registry AND migrate every note carrying the old label.
+      setTags((prev) => prev.map((t) => (t.id === tagId ? { ...t, name: normalized } : t)));
+      setState((prevNotes) => ({
+        ...prevNotes,
+        notes: prevNotes.notes.map((n) =>
+          n.tags.includes(target.name)
+            ? { ...n, tags: n.tags.map((t) => (t === target.name ? normalized : t)) }
+            : n,
+        ),
+      }));
+    },
+    [tags],
+  );
+
+  const retagColor = useCallback((tagId: string, color: string) => {
+    if (!/^#[0-9a-fA-F]{3,8}$/.test(color)) return;
+    setTags((prev) => prev.map((t) => (t.id === tagId ? { ...t, color } : t)));
+  }, []);
+
+  const deleteTag = useCallback(
+    (tagId: string) => {
+      const target = tags.find((t) => t.id === tagId);
+      if (!target) return;
+      // Strip the label from all notes before removing the definition.
+      setTags((prev) => prev.filter((t) => t.id !== tagId));
+      setState((prevNotes) => ({
+        ...prevNotes,
+        notes: prevNotes.notes.map((n) =>
+          n.tags.includes(target.name)
+            ? { ...n, tags: n.tags.filter((t) => t !== target.name), updatedAt: Date.now() }
+            : n,
+        ),
+      }));
+    },
+    [tags],
+  );
+
+  const findTagByName = useCallback(
+    (name: string): TagDefinition | undefined =>
+      tags.find((t) => t.name.toLowerCase() === name.trim().toLowerCase()),
+    [tags],
   );
 
   return {
@@ -721,6 +894,14 @@ export function useNotes(): UseNotesResult {
     setDrawings,
 
     searchNotes,
+    searchAllNotes,
+
+    tags,
+    createTag,
+    renameTag,
+    retagColor,
+    deleteTag,
+    findTagByName,
 
     stats,
     isSaving,

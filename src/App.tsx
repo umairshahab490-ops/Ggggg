@@ -1,17 +1,23 @@
 /**
  * App.tsx
  * ---------------------------------------------------------------------------
- * Root application shell for the OneNote Clone (Phase 1).
+ * Root application shell for the OneNote Clone (Phases 1–3).
  *
  * Layout contract:
  *   ┌───────────────────────────────────────────────────────────────┐
- *   │ Header (#681498): brand · search · save status · new page     │
+ *   │ Header (#681498): brand · search · export · save status      │
  *   ├────────────┬──────────────┬───────────────────────────────────┤
  *   │ Notebooks  │ Sections +   │ Page canvas (title, body,         │
  *   │ rail       │ page list    │ tags, background styles)          │
+ *   │            │ + tag filter │                                   │
  *   ├────────────┴──────────────┴───────────────────────────────────┤
  *   │ Status bar: breadcrumb · word/char/line stats · save time     │
  *   └───────────────────────────────────────────────────────────────┘
+ *
+ * Phase 3 additions:
+ *   • Global instant SearchModal (Ctrl+F / ⌘F or clicking the search bar).
+ *   • Tag Manager panel + colored tag chips + sidebar tag filtering.
+ *   • Export menu (Markdown / Plain text / HTML / JSON backup).
  * ---------------------------------------------------------------------------
  */
 
@@ -19,12 +25,14 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ChangeEvent, CSSProperties, FormEvent } from 'react';
 import { useNotes } from './useNotes';
 import type { UseNotesResult } from './useNotes';
-import type { BackgroundStyle, DrawingData, Note, Notebook, Section } from './types';
-import { DEFAULT_TAGS } from './types';
+import type { BackgroundStyle, DrawingData, Note, Notebook, Section, TagDefinition } from './types';
 import RichTextEditor from './RichTextEditor';
 import DrawingCanvas from './DrawingCanvas';
 import type { DrawingCanvasHandle, DrawingToolbarState, InkTool } from './DrawingCanvas';
 import { normalizeDrawings } from './DrawingCanvas';
+import SearchModal from './SearchModal';
+import ExportMenu from './ExportMenu';
+import { TagChip, TagManagerPanel } from './TagManager';
 import { INK_COLORS, htmlToPlainText } from './richText';
 
 /** Minimal stroke model for the quick-draw overlay on the page list. */
@@ -248,25 +256,25 @@ function TrashIcon({ size = 14, className }: IconProps) {
  * ======================================================================== */
 
 interface HeaderBarProps {
-  searchQuery: string;
-  onSearchChange: (value: string) => void;
+  onOpenSearch: () => void;
   isSaving: boolean;
   lastSavedAt: number | null;
   onNewPage: () => void;
   onNewSection: () => void;
   onNewNotebook: () => void;
   disabled: boolean;
+  exportMenu: React.ReactNode;
 }
 
 function HeaderBar({
-  searchQuery,
-  onSearchChange,
+  onOpenSearch,
   isSaving,
   lastSavedAt,
   onNewPage,
   onNewSection,
   onNewNotebook,
   disabled,
+  exportMenu,
 }: HeaderBarProps) {
   return (
     <header
@@ -284,19 +292,20 @@ function HeaderBar({
         <h1 className="text-[15px] font-semibold tracking-wide">OneNote</h1>
       </div>
 
-      {/* Search */}
+      {/* Search trigger — clicking opens the global instant-search modal. */}
       <div className="relative mx-auto w-full max-w-xl">
-        <span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-white/70">
+        <button
+          type="button"
+          onClick={onOpenSearch}
+          aria-label="Open search (Ctrl+F)"
+          className="flex h-8 w-full items-center gap-2 rounded-md border border-white/20 bg-white/10 px-3 text-left text-sm text-white/70 outline-none transition hover:bg-white/15 focus:border-white/50 focus:bg-white/15"
+        >
           <SearchIcon />
-        </span>
-        <input
-          type="search"
-          value={searchQuery}
-          onChange={(e: ChangeEvent<HTMLInputElement>) => onSearchChange(e.target.value)}
-          placeholder="Search notes, tags, content…"
-          aria-label="Search notes"
-          className="h-8 w-full rounded-md border border-white/20 bg-white/10 pl-9 pr-3 text-sm text-white placeholder-white/60 outline-none transition focus:border-white/50 focus:bg-white/15"
-        />
+          <span className="flex-1 truncate">Search notes, tags, content…</span>
+          <kbd className="hidden rounded border border-white/30 bg-white/10 px-1.5 py-px text-[10px] font-medium text-white/80 sm:block">
+            Ctrl F
+          </kbd>
+        </button>
       </div>
 
       {/* Save status */}
@@ -306,6 +315,9 @@ function HeaderBar({
         />
         {isSaving ? 'Saving…' : formatRelativeTime(lastSavedAt)}
       </div>
+
+      {/* Export ribbon (File · Review) */}
+      {exportMenu}
 
       {/* Primary actions */}
       <div className="flex items-center gap-2">

@@ -168,3 +168,44 @@ export const DEFAULT_TAGS: readonly string[] = [
   'Follow Up',
   'Personal',
 ];
+
+/**
+ * A user-manageable, color-coded label (Phase 3 Tag Manager).
+ *
+ * The palette defaults cover the classic OneNote indicator colors; users can
+ * create additional custom tags with any hex color. Notes reference tags by
+ * their display `name` (`Note.tags`), so `TagDefinition.name` is the join key.
+ */
+export interface TagDefinition {
+  /** Stable unique identifier (UUID-like). */
+  id: string;
+  /** Display name shown on chips and filters (e.g. "Important"). */
+  name: string;
+  /** Chip background color as a CSS hex string (e.g. "#d13438"). */
+  color: string;
+}
+
+/** Well-known localStorage key for the tag registry. */
+export const TAGS_STORAGE_KEY = 'onenote-clone:tags:v1';
+
+/** Seed registry matching `DEFAULT_TAGS`, each with an indicator color. */
+export const DEFAULT_TAG_DEFINITIONS: readonly TagDefinition[] = [
+  { id: 'tag_important', name: 'Important', color: '#d13438' },
+  { id: 'tag_question', name: 'Question', color: '#0078d4' },
+  { id: 'tag_todo', name: 'To-Do', color: '#681498' },
+  { id: 'tag_idea', name: 'Idea', color: '#c17c03' },
+  { id: 'tag_followup', name: 'Follow Up', color: '#107c10' },
+  { id: 'tag_personal', name: 'Personal', color: '#00b7c3' },
+];
+
+/** Colors cycled when the user creates a brand-new custom tag. */
+export const TAG_COLOR_PALETTE: readonly string[] = [
+  '#681498',
+  '#d13438',
+  '#0078d4',
+  '#107c10',
+  '#c17c03',
+  '#00b7c3',
+  '#8764b8',
+  '#498205',
+];
